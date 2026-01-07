@@ -1,0 +1,2 @@
+model,rmse_val,mae_val,r2_val,rmse_test,mae_test,r2_test,runtime_sec,n_train,n_val,n_test,n_features
+BayesianRidge_prob,3317.5564664003514,2401.743212121212,0.9697466380399105,3508.4638859623024,2562.895636363636,0.9635912869004449,0.037,291,33,33,26
