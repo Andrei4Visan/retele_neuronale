@@ -1,6 +1,12 @@
 # FILE: model_rbf_scratch.py
-# RBF Network FROM SCRATCH (centers + Phi matrix + closed-form ridge)
-# Uses dataset_features.csv generated earlier.
+# Retea RBF implementata de la zero (centre + matrice Phi + solutie inchisa ridge)
+# Folosim dataset_features.csv generat anterior.
+#
+# Ideea generala:
+# Folosim o retea RBF pentru a aproxima relatia dintre variabilele explicative
+# si consumul total de energie. Activarile RBF sunt functii Gaussiene centrate
+# in anumite puncte din spatiul de date, iar ponderile de iesire sunt calculate
+# analitic prin ridge regression.
 
 import time
 import numpy as np
@@ -12,6 +18,16 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 
 def temporal_split(df_feat: pd.DataFrame, train_end=2018, val_end=2021):
+    """
+    Realizam un split temporal al datelor:
+    - train: ani <= train_end
+    - validation: train_end < ani <= val_end
+    - test: ani > val_end
+
+    Procedam astfel pentru a evita data leakage.
+    In problemele cu componenta temporala, nu avem voie
+    sa folosim informatii din viitor pentru a invata trecutul.
+    """
     train = df_feat[df_feat["year"] <= train_end].copy()
     val = df_feat[(df_feat["year"] > train_end) & (df_feat["year"] <= val_end)].copy()
     test = df_feat[df_feat["year"] > val_end].copy()
@@ -19,12 +35,21 @@ def temporal_split(df_feat: pd.DataFrame, train_end=2018, val_end=2021):
 
 
 def fix_inf_nan_inplace(dset: pd.DataFrame, skip_cols=("country", "year")):
-    # Replace inf with NaN
+    """
+    Curatam valorile numerice problematice din dataset.
+
+    Pasii sunt:
+    1) Inlocuim valorile +inf si -inf cu NaN.
+    2) Completam valorile NaN pentru coloanele numerice
+       folosind mediana coloanei.
+
+    Alegem mediana deoarece este mai robusta la valori extreme
+    si nu distorsioneaza distributia la fel de mult ca media.
+    """
     dset.replace([np.inf, -np.inf], np.nan, inplace=True)
 
     nan_before = int(dset.isna().sum().sum())
 
-    # Fill NaN with median for numeric columns
     for col in dset.columns:
         if col in skip_cols:
             continue
@@ -37,12 +62,20 @@ def fix_inf_nan_inplace(dset: pd.DataFrame, skip_cols=("country", "year")):
 
 
 def select_features_anti_leakage(df_feat: pd.DataFrame):
-    # Target + identifiers
+    """
+    Selectam variabilele explicative, eliminand coloanele
+    care pot introduce leakage sau predictii triviale.
+
+    Eliminam:
+    - identificatori (country, year)
+    - variabila tinta (total)
+    - sectoarele brute, deoarece totalul este foarte corelat
+      cu acestea si modelul ar invata aproape direct suma lor.
+    """
     drop_cols = [
         "country",
         "year",
         "total",
-        # Raw sectors (optional drop to avoid trivial reconstruction)
         "industry",
         "transport",
         "services",
@@ -59,7 +92,21 @@ def select_features_anti_leakage(df_feat: pd.DataFrame):
 
 
 def rbf_phi(X: np.ndarray, centers: np.ndarray, gamma: float) -> np.ndarray:
-    # Phi[i, j] = exp(-gamma * ||x_i - c_j||^2)
+    """
+    Construim matricea Phi pentru reteaua RBF.
+
+    Formula folosita este:
+        Phi[i, j] = exp(-gamma * ||x_i - c_j||^2)
+
+    Interpretare:
+    - masuram distanta dintre fiecare observatie si fiecare centru
+    - aplicam o functie Gaussiana care produce activari mari
+      pentru puncte apropiate si mici pentru puncte indepartate
+
+    Parametrul gamma controleaza latimea functiei:
+    - gamma mare -> functii inguste, comportament foarte local
+    - gamma mic  -> functii late, comportament mai neted
+    """
     Phi = np.zeros((X.shape[0], centers.shape[0]), dtype=float)
     for i in range(X.shape[0]):
         for j in range(centers.shape[0]):
@@ -69,7 +116,14 @@ def rbf_phi(X: np.ndarray, centers: np.ndarray, gamma: float) -> np.ndarray:
 
 
 def eval_metrics(y_true, y_pred, name):
-    mse = mean_squared_error(y_true, y_pred)  # fara squared=
+    """
+    Calculam metricile standard de evaluare pentru regresie.
+
+    - RMSE: penalizeaza mai mult erorile mari
+    - MAE: masura mai robusta la outlieri
+    - R2: cat din variatia lui y este explicata de model
+    """
+    mse = mean_squared_error(y_true, y_pred)
     rmse = float(np.sqrt(mse))
     mae = float(mean_absolute_error(y_true, y_pred))
     r2 = float(r2_score(y_true, y_pred))
@@ -77,39 +131,45 @@ def eval_metrics(y_true, y_pred, name):
     return rmse, mae, r2
 
 
-
 def main():
+    """
+    In aceasta functie implementam intregul pipeline:
+
+    1) Citim datele
+    2) Realizam split temporal
+    3) Selectam feature-urile
+    4) Curatam valorile NaN si Inf
+    5) Scalare MinMax (fit doar pe train)
+    6) Construim si antrenam reteaua RBF
+    7) Evaluam rezultatele pe validation si test
+
+    Observatie:
+    In acest model nu folosim gradient descent si learning rate.
+    Ponderile sunt calculate direct printr-o solutie analitica
+    de tip ridge regression.
+    """
     t0 = time.time()
 
     print("START model_rbf_scratch.py")
     print("=== MODEL: RBF FROM SCRATCH ===")
 
-    # 1) Load features dataset
+    # Incarcam dataset-ul de feature-uri
     path = "dataset_features.csv"
     df_feat = pd.read_csv(path)
     print("Citit:", path)
     print("Dimensiuni:", df_feat.shape)
 
-    # 2) Split temporal
-    print("\n=== SPLIT TEMPORAL ===")
+    # Split temporal
     train, val, test = temporal_split(df_feat, train_end=2018, val_end=2021)
-    print("Train:", train.shape)
-    print("Val:", val.shape)
-    print("Test:", test.shape)
 
-    # 3) Feature selection (anti-leakage)
-    print("\n=== FEATURE SELECTION (anti-leakage) ===")
+    # Selectie feature-uri
     feature_cols = select_features_anti_leakage(df_feat)
-    print("Nr features:", len(feature_cols))
-    print("Features care incep cu total_ (trebuie 0):", sum(c.startswith("total_") for c in feature_cols))
 
-    # 4) Fix inf/nan on each split (IMPORTANT: after split)
-    print("\n=== TRATARE INF / NaN (pe train/val/test) ===")
-    for name, dset in [("train", train), ("val", val), ("test", test)]:
-        nb, na = fix_inf_nan_inplace(dset, skip_cols=("country", "year"))
-        print(f"{name}: NaN inainte={nb}, dupa={na}")
+    # Curatare NaN si Inf separat pe fiecare split
+    for dset in [train, val, test]:
+        fix_inf_nan_inplace(dset, skip_cols=("country", "year"))
 
-    # 5) Build X/y
+    # Construim X si y
     X_train = train[feature_cols].values
     y_train = train["total"].values
 
@@ -119,45 +179,33 @@ def main():
     X_test = test[feature_cols].values
     y_test = test["total"].values
 
-    # 6) Scale features (fit only on train)
-    print("\n=== SCALARE (MinMax) ===")
+    # Scalare MinMax
     scaler = MinMaxScaler()
     X_train_s = scaler.fit_transform(X_train)
     X_val_s = scaler.transform(X_val)
     X_test_s = scaler.transform(X_test)
 
-    print("X_train_s:", X_train_s.shape, "y_train:", y_train.shape)
+    # Hiperparametri RBF
+    K = 25
+    gamma = 10.0
+    lam = 1e-3
 
-    # ============================
-    # RBF FROM SCRATCH
-    # ============================
-    print("\n=== RBF FROM SCRATCH ===")
-
-    # Hyperparametri simpli
-    K = 25          # numar centre RBF
-    gamma = 10.0    # latimea functiei RBF
-    lam = 1e-3      # regularizare ridge
-
-    # 1) Selectie centre (random din train)
+    # Alegem centrele RBF aleator din setul de antrenare
     rng = np.random.default_rng(42)
-    if K > len(X_train_s):
-        K = len(X_train_s)
-
     idx = rng.choice(len(X_train_s), size=K, replace=False)
     centers = X_train_s[idx]
-    print("Nr centre RBF:", centers.shape)
 
-    # 2) Matrice Phi
+    # Construim matricea Phi
     Phi_train = rbf_phi(X_train_s, centers, gamma)
     Phi_val = rbf_phi(X_val_s, centers, gamma)
     Phi_test = rbf_phi(X_test_s, centers, gamma)
 
-    # Bias term
+    # Adaugam termen de bias
     Phi_train = np.hstack([np.ones((Phi_train.shape[0], 1)), Phi_train])
     Phi_val = np.hstack([np.ones((Phi_val.shape[0], 1)), Phi_val])
     Phi_test = np.hstack([np.ones((Phi_test.shape[0], 1)), Phi_test])
 
-    # 3) Closed-form ridge regression: W = (Phi^T Phi + lam I)^(-1) Phi^T y
+    # Calculam ponderile folosind solutia inchisa ridge
     I = np.eye(Phi_train.shape[1])
     W = np.linalg.inv(Phi_train.T @ Phi_train + lam * I) @ (Phi_train.T @ y_train)
 
@@ -166,49 +214,10 @@ def main():
     pred_test = Phi_test @ W
 
     # Evaluare
-    print("\n=== EVALUARE RBF SCRATCH ===")
-    rmse_v, mae_v, r2_v = eval_metrics(y_val, pred_val, "VAL")
-    rmse_t, mae_t, r2_t = eval_metrics(y_test, pred_test, "TEST")
+    eval_metrics(y_val, pred_val, "VAL")
+    eval_metrics(y_test, pred_test, "TEST")
 
-    # Salvare metrici
-    metrics_rbf = pd.DataFrame([{
-        "model": "RBF_scratch",
-        "K": K,
-        "gamma": gamma,
-        "lambda": lam,
-        "rmse_val": rmse_v,
-        "mae_val": mae_v,
-        "r2_val": r2_v,
-        "rmse_test": rmse_t,
-        "mae_test": mae_t,
-        "r2_test": r2_t
-    }])
-
-    metrics_rbf.to_csv("metrics_rbf_scratch.csv", index=False)
-    print("Metrici salvate in metrics_rbf_scratch.csv")
-
-    # 4) Grafice simple (optional, dar utile)
-    plt.figure()
-    plt.scatter(y_test, pred_test)
-    plt.title("RBF Scratch: Actual vs Predicted (Test)")
-    plt.xlabel("Actual total (TEST)")
-    plt.ylabel("Predicted total (TEST)")
-    plt.tight_layout()
-    plt.savefig("rbf_scratch_actual_vs_pred_test.png", dpi=150)
-    plt.show()
-
-    residuals = y_test - pred_test
-    plt.figure()
-    plt.scatter(pred_test, residuals)
-    plt.axhline(0)
-    plt.title("RBF Scratch: Residuals vs Predicted (Test)")
-    plt.xlabel("Predicted total (TEST)")
-    plt.ylabel("Residual (Actual - Predicted)")
-    plt.tight_layout()
-    plt.savefig("rbf_scratch_residuals_vs_pred_test.png", dpi=150)
-    plt.show()
-
-    print("\nRuntime sec:", round(time.time() - t0, 3))
+    print("Runtime:", round(time.time() - t0, 3), "sec")
 
 
 if __name__ == "__main__":
